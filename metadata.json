@@ -1,0 +1,9 @@
+{
+	"name": "LLM Classification",
+	"author": "Alkarex, widowild1",
+	"description": "Tag incoming articles by calling an OpenAI-compatible LLM API",
+	"version": "0.3.2",
+	"entrypoint": "LlmClassification",
+	"type": "user",
+	"compatibility": "1.28.2"
+}
