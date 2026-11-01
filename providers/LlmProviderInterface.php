@@ -11,7 +11,7 @@ interface LlmProviderInterface {
 	public function getPlaceholderModel(): string;
 	public function getPlaceholderUrl(): string;
 	public function requiresCustomUrl(): bool;
-	
+
 	/**
 	 * @return list<string>
 	 */
