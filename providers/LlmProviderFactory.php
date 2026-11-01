@@ -8,8 +8,8 @@ final class LlmProviderFactory {
 	 */
 	public static function getAll(): array {
 		return [
-			'openai'   => new OpenAiProvider(),
 			'gemini'   => new GeminiProvider(),
+			'openai'   => new OpenAiProvider(),
 			'mistral'  => new MistralProvider(),
 			'ollama'   => new OllamaProvider(),
 			'llamacpp' => new LlamaCppProvider(),
@@ -19,6 +19,6 @@ final class LlmProviderFactory {
 
 	public static function get(string $providerId): LlmProviderInterface {
 		$all = self::getAll();
-		return $all[$providerId] ?? $all['custom'];
+		return $all[$providerId] ?? $all['gemini'];
 	}
 }
