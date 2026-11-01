@@ -3,13 +3,11 @@
 declare(strict_types=1);
 
 abstract class AbstractLlmProvider implements LlmProviderInterface {
-	#[\Override]
 	public function getChatCompletionsUrl(string $configuredUrl = ''): string {
 		$base = rtrim($this->getBaseUrl($configuredUrl), '/');
 		return $base . '/chat/completions';
 	}
 
-	#[\Override]
 	public function buildHeaders(string $apiKey): array {
 		$headers = [
 			'Content-Type: application/json',
@@ -21,7 +19,6 @@ abstract class AbstractLlmProvider implements LlmProviderInterface {
 		return $headers;
 	}
 
-	#[\Override]
 	public function buildRequestBody(
 		string $model,
 		string $systemPrompt,
@@ -52,9 +49,6 @@ abstract class AbstractLlmProvider implements LlmProviderInterface {
 		return $body;
 	}
 
-	/**
-	 * Fournit une explication détaillée en français selon le code d'erreur HTTP.
-	 */
 	public static function explainHttpError(int $httpCode, string $rawBody = '', string $curlError = ''): string {
 		$apiErrorMessage = '';
 		if ($rawBody !== '') {
