@@ -1,17 +1,34 @@
 <?php
 	declare(strict_types=1);
 	/** @var LlmClassificationExtension $this */
+	$currentProviderId = (string)($this->getConfigValue('provider') ?? 'gemini');
+	$allProviders = LlmProviderFactory::getAll();
+	$currentProvider = LlmProviderFactory::get($currentProviderId);
 ?>
-<form action="<?= _url('extension', 'configure', 'e', urlencode($this->getName())) ?>" method="post">
-	<input type="hidden" name="_csrf" value="<?= FreshRSS_Auth::csrfToken() ?>" />
+<form id="llm-config-form" action="<?= _url('extension', 'configure', 'e', urlencode($this->getName())) ?>" method="post">
+	<input type="hidden" name="_csrf" id="_csrf" value="<?= FreshRSS_Auth::csrfToken() ?>" />
 
 	<legend><?= _t('ext.llm_classification.api.title') ?></legend>
 
 	<div class="form-group">
+		<label class="group-name" for="provider"><?= _t('ext.llm_classification.api.provider') ?></label>
+		<div class="group-controls">
+			<select name="provider" id="provider" class="w100">
+				<?php foreach ($allProviders as $p): ?>
+					<option value="<?= $p->getId() ?>" <?= $p->getId() === $currentProviderId ? 'selected' : '' ?>>
+						<?= htmlspecialchars($p->getName(), ENT_COMPAT, 'UTF-8') ?>
+					</option>
+				<?php endforeach; ?>
+			</select>
+		</div>
+	</div>
+
+	<div class="form-group" id="group-api-url" style="<?= $currentProvider->requiresCustomUrl() ? '' : 'display:none;' ?>">
 		<label class="group-name" for="api_url"><?= _t('ext.llm_classification.api.url') ?></label>
 		<div class="group-controls">
-			<input type="url" name="api_url" id="api_url" class="w100" placeholder="https://api.openai.com/v1" value="<?=
-				htmlspecialchars($this->getUserConfigurationString('api_url') ?? '', ENT_COMPAT, 'UTF-8') ?>" />
+			<input type="url" name="api_url" id="api_url" class="w100"
+				placeholder="<?= htmlspecialchars($currentProvider->getPlaceholderUrl(), ENT_COMPAT, 'UTF-8') ?>"
+				value="<?= htmlspecialchars((string)($this->getConfigValue('api_url') ?? ''), ENT_COMPAT, 'UTF-8') ?>" />
 			<p class="help"><?= _t('ext.llm_classification.api.url_help') ?></p>
 		</div>
 	</div>
@@ -19,8 +36,8 @@
 	<div class="form-group">
 		<label class="group-name" for="api_key"><?= _t('ext.llm_classification.api.key') ?></label>
 		<div class="group-controls">
-			<input type="password" name="api_key" id="api_key" class="w100" autocomplete="off" value="<?=
-				htmlspecialchars($this->getUserConfigurationString('api_key') ?? '', ENT_COMPAT, 'UTF-8') ?>" />
+			<input type="password" name="api_key" id="api_key" class="w100" autocomplete="off"
+				value="<?= htmlspecialchars((string)($this->getConfigValue('api_key') ?? ''), ENT_COMPAT, 'UTF-8') ?>" />
 			<p class="help"><?= _t('ext.llm_classification.api.key_help') ?></p>
 		</div>
 	</div>
@@ -28,8 +45,9 @@
 	<div class="form-group">
 		<label class="group-name" for="model"><?= _t('ext.llm_classification.api.model') ?></label>
 		<div class="group-controls">
-			<input type="text" name="model" id="model" class="w100" value="<?=
-				htmlspecialchars($this->getUserConfigurationString('model') ?? LlmClassificationExtension::DEFAULT_MODEL, ENT_COMPAT, 'UTF-8') ?>" />
+			<input type="text" name="model" id="model" class="w100"
+				placeholder="<?= htmlspecialchars($currentProvider->getPlaceholderModel(), ENT_COMPAT, 'UTF-8') ?>"
+				value="<?= htmlspecialchars((string)($this->getConfigValue('model') ?? $currentProvider->getDefaultModel()), ENT_COMPAT, 'UTF-8') ?>" />
 			<p class="help"><?= _t('ext.llm_classification.api.model_help') ?></p>
 		</div>
 	</div>
@@ -37,16 +55,27 @@
 	<div class="form-group">
 		<label class="group-name" for="timeout"><?= _t('ext.llm_classification.api.timeout') ?></label>
 		<div class="group-controls">
-			<input type="number" name="timeout" id="timeout" min="1" max="300" value="<?=
-				$this->getUserConfigurationInt('timeout') ?? LlmClassificationExtension::DEFAULT_TIMEOUT ?>" />
+			<input type="number" name="timeout" id="timeout" min="1" max="300"
+				value="<?= (int)($this->getConfigValue('timeout') ?? LlmClassificationExtension::DEFAULT_TIMEOUT) ?>" />
+		</div>
+	</div>
+
+	<div class="form-group">
+		<label class="group-name"></label>
+		<div class="group-controls">
+			<button type="button" id="btn-test-connection" class="btn btn-attention">
+				⚡ <?= _t('ext.llm_classification.api.test_btn') ?>
+			</button>
+			<span id="test-spinner" style="display:none; margin-left:10px;">⏳ <?= _t('ext.llm_classification.api.test_in_progress') ?></span>
+			<div id="test-feedback-box" style="display:none; margin-top:10px; padding:12px; border-radius:4px; font-size:0.95em;"></div>
 		</div>
 	</div>
 
 	<div class="form-group">
 		<label class="group-name" for="max_tokens"><?= _t('ext.llm_classification.api.max_tokens') ?></label>
 		<div class="group-controls">
-			<input type="number" name="max_tokens" id="max_tokens" min="0" value="<?=
-				$this->getUserConfigurationInt('max_tokens') ?? LlmClassificationExtension::DEFAULT_MAX_TOKENS ?>" />
+			<input type="number" name="max_tokens" id="max_tokens" min="0"
+				value="<?= (int)($this->getConfigValue('max_tokens') ?? LlmClassificationExtension::DEFAULT_MAX_TOKENS) ?>" />
 			<p class="help"><?= _t('ext.llm_classification.api.max_tokens_help') ?></p>
 		</div>
 	</div>
@@ -54,8 +83,8 @@
 	<div class="form-group">
 		<label class="group-name" for="max_retries"><?= _t('ext.llm_classification.api.max_retries') ?></label>
 		<div class="group-controls">
-			<input type="number" name="max_retries" id="max_retries" min="0" max="5" value="<?=
-				$this->getUserConfigurationInt('max_retries') ?? LlmClassificationExtension::DEFAULT_MAX_RETRIES ?>" />
+			<input type="number" name="max_retries" id="max_retries" min="0" max="5"
+				value="<?= (int)($this->getConfigValue('max_retries') ?? LlmClassificationExtension::DEFAULT_MAX_RETRIES) ?>" />
 			<p class="help"><?= _t('ext.llm_classification.api.max_retries_help') ?></p>
 		</div>
 	</div>
@@ -84,8 +113,8 @@
 	<div class="form-group">
 		<label class="group-name" for="max_content_length"><?= _t('ext.llm_classification.prompts.max_content_length') ?></label>
 		<div class="group-controls">
-			<input type="number" name="max_content_length" id="max_content_length" min="0" value="<?=
-				$this->getUserConfigurationInt('max_content_length') ?? LlmClassificationExtension::DEFAULT_MAX_CONTENT_LENGTH ?>" />
+			<input type="number" name="max_content_length" id="max_content_length" min="0"
+				value="<?= (int)($this->getConfigValue('max_content_length') ?? LlmClassificationExtension::DEFAULT_MAX_CONTENT_LENGTH) ?>" />
 			<p class="help"><?= _t('ext.llm_classification.prompts.max_content_length_help') ?></p>
 		</div>
 	</div>
@@ -96,15 +125,15 @@
 		<label class="group-name" for="enable_tags"><?= _t('ext.llm_classification.tags.enable') ?></label>
 		<div class="group-controls">
 			<input type="checkbox" name="enable_tags" id="enable_tags" value="1" <?=
-				$this->getUserConfigurationBool('enable_tags') ? 'checked' : '' ?> />
+				$this->getConfigValue('enable_tags') ? 'checked' : '' ?> />
 		</div>
 	</div>
 
 	<div class="form-group">
 		<label class="group-name" for="tag_prefix"><?= _t('ext.llm_classification.tags.prefix') ?></label>
 		<div class="group-controls">
-			<input type="text" name="tag_prefix" id="tag_prefix" class="w100" value="<?=
-				htmlspecialchars($this->getUserConfigurationString('tag_prefix') ?? '', ENT_COMPAT, 'UTF-8') ?>" />
+			<input type="text" name="tag_prefix" id="tag_prefix" class="w100"
+				value="<?= htmlspecialchars((string)($this->getConfigValue('tag_prefix') ?? ''), ENT_COMPAT, 'UTF-8') ?>" />
 			<p class="help"><?= _t('ext.llm_classification.tags.prefix_help') ?></p>
 		</div>
 	</div>
@@ -113,7 +142,7 @@
 		<label class="group-name" for="allowed_tags"><?= _t('ext.llm_classification.tags.allowed') ?></label>
 		<div class="group-controls">
 			<textarea name="allowed_tags" id="allowed_tags" class="w100"><?=
-				htmlspecialchars($this->getUserConfigurationString('allowed_tags') ?? '', ENT_COMPAT, 'UTF-8')
+				htmlspecialchars((string)($this->getConfigValue('allowed_tags') ?? ''), ENT_COMPAT, 'UTF-8')
 			?></textarea>
 			<p class="help"><?= _t('ext.llm_classification.tags.allowed_help') ?></p>
 		</div>
@@ -125,7 +154,7 @@
 		<label class="group-name" for="search_filter"><?= _t('ext.llm_classification.filter.search') ?></label>
 		<div class="group-controls">
 			<textarea name="search_filter" id="search_filter" class="w100"><?=
-				htmlspecialchars($this->getUserConfigurationString('search_filter') ?? '', ENT_COMPAT, 'UTF-8')
+				htmlspecialchars((string)($this->getConfigValue('search_filter') ?? ''), ENT_COMPAT, 'UTF-8')
 			?></textarea>
 			<p class="help"><?= _t('ext.llm_classification.filter.search_help') ?></p>
 			<p class="help"><?= _i('help') ?> <?= _t('sub.feed.filteractions.help') ?></p>
@@ -136,7 +165,7 @@
 		<label class="group-name" for="allow_thinking"><?= _t('ext.llm_classification.api.allow_thinking') ?></label>
 		<div class="group-controls">
 			<input type="checkbox" name="allow_thinking" id="allow_thinking" value="1" <?=
-				$this->getUserConfigurationBool('allow_thinking') ? 'checked' : '' ?> />
+				$this->getConfigValue('allow_thinking') ? 'checked' : '' ?> />
 			<p class="help"><?= _t('ext.llm_classification.api.allow_thinking_help') ?></p>
 		</div>
 	</div>
@@ -148,3 +177,105 @@
 		</div>
 	</div>
 </form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+	const providerMeta = {
+		<?php foreach ($allProviders as $p): ?>
+		'<?= $p->getId() ?>': {
+			requiresUrl: <?= $p->requiresCustomUrl() ? 'true' : 'false' ?>,
+			placeholderUrl: '<?= addslashes($p->getPlaceholderUrl()) ?>',
+			defaultModel: '<?= addslashes($p->getDefaultModel()) ?>',
+			placeholderModel: '<?= addslashes($p->getPlaceholderModel()) ?>'
+		},
+		<?php endforeach; ?>
+	};
+
+	const providerSelect = document.getElementById('provider');
+	const urlGroup = document.getElementById('group-api-url');
+	const urlInput = document.getElementById('api_url');
+	const modelInput = document.getElementById('model');
+
+	function updateUiForProvider() {
+		const meta = providerMeta[providerSelect.value];
+		if (!meta) return;
+
+		if (meta.requiresUrl) {
+			urlGroup.style.display = '';
+			urlInput.placeholder = meta.placeholderUrl;
+		} else {
+			urlGroup.style.display = 'none';
+		}
+		modelInput.placeholder = meta.placeholderModel;
+	}
+
+	providerSelect.addEventListener('change', updateUiForProvider);
+
+	const btnTest = document.getElementById('btn-test-connection');
+	const spinner = document.getElementById('test-spinner');
+	const feedback = document.getElementById('test-feedback-box');
+	const form = document.getElementById('llm-config-form');
+
+	btnTest.addEventListener('click', function() {
+		btnTest.disabled = true;
+		spinner.style.display = 'inline';
+		feedback.style.display = 'none';
+
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+		const formData = new FormData();
+		formData.append('action', 'test_connection');
+		formData.append('_csrf', document.getElementById('_csrf').value);
+		formData.append('provider', providerSelect.value);
+		formData.append('api_url', urlInput.value);
+		formData.append('api_key', document.getElementById('api_key').value);
+		formData.append('model', modelInput.value);
+		formData.append('timeout', '8');
+
+		fetch(form.action, {
+			method: 'POST',
+			body: formData,
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			signal: controller.signal
+		})
+		.then(res => {
+			clearTimeout(timeoutId);
+			if (!res.ok) {
+				throw new Error('Erreur HTTP serveur : ' + res.status);
+			}
+			return res.json();
+		})
+		.then(data => {
+			feedback.style.display = 'block';
+			if (data.success) {
+				feedback.style.background = '#d4edda';
+				feedback.style.color = '#155724';
+				feedback.style.border = '1px solid #c3e6cb';
+				feedback.innerHTML = '<strong>✔ ' + data.message + '</strong><br>' + data.detail;
+			} else {
+				feedback.style.background = '#f8d7da';
+				feedback.style.color = '#721c24';
+				feedback.style.border = '1px solid #f5c6cb';
+				feedback.innerHTML = '<strong>❌ ' + data.message + ' (HTTP ' + data.code + ')</strong><br>' + data.detail;
+			}
+		})
+		.catch(err => {
+			clearTimeout(timeoutId);
+			feedback.style.display = 'block';
+			feedback.style.background = '#f8d7da';
+			feedback.style.color = '#721c24';
+			feedback.style.border = '1px solid #f5c6cb';
+			if (err.name === 'AbortError') {
+				feedback.innerHTML = '<strong>❌ Délai d’attente dépassé</strong><br>Le serveur n’a pas répondu en 12 secondes. Vérifiez l’URL de l’API et vos connexions sortantes.';
+			} else {
+				feedback.innerHTML = '<strong>❌ Erreur</strong><br>' + err.message;
+			}
+		})
+		.finally(() => {
+			btnTest.disabled = false;
+			spinner.style.display = 'none';
+		});
+	});
+});
+</script>
