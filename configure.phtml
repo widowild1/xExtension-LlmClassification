@@ -1,13 +1,18 @@
 <?php
 	declare(strict_types=1);
 	/** @var LlmClassificationExtension $this */
-	$currentProviderId = (string)($this->getConfigValue('provider') ?? 'gemini');
 	$allProviders = LlmProviderFactory::getAll();
+	$currentProviderId = (string)($this->getConfigValue('provider') ?? 'gemini');
 	$currentProvider = LlmProviderFactory::get($currentProviderId);
+
+	$fallbackProviderId = (string)($this->getConfigValue('fallback_provider') ?? 'ollama');
+	$fallbackProvider = LlmProviderFactory::get($fallbackProviderId);
+	$enableFallback = (bool)($this->getConfigValue('enable_fallback') ?? false);
 ?>
 <form id="llm-config-form" action="<?= _url('extension', 'configure', 'e', urlencode($this->getName())) ?>" method="post">
 	<input type="hidden" name="_csrf" id="_csrf" value="<?= FreshRSS_Auth::csrfToken() ?>" />
 
+	<!-- SECTION PRINCIPALE -->
 	<legend><?= _t('ext.llm_classification.api.title') ?></legend>
 
 	<div class="form-group">
@@ -53,14 +58,6 @@
 	</div>
 
 	<div class="form-group">
-		<label class="group-name" for="timeout"><?= _t('ext.llm_classification.api.timeout') ?></label>
-		<div class="group-controls">
-			<input type="number" name="timeout" id="timeout" min="1" max="300"
-				value="<?= (int)($this->getConfigValue('timeout') ?? LlmClassificationExtension::DEFAULT_TIMEOUT) ?>" />
-		</div>
-	</div>
-
-	<div class="form-group">
 		<label class="group-name"></label>
 		<div class="group-controls">
 			<button type="button" id="btn-test-connection" class="btn btn-attention">
@@ -68,6 +65,80 @@
 			</button>
 			<span id="test-spinner" style="display:none; margin-left:10px;">⏳ <?= _t('ext.llm_classification.api.test_in_progress') ?></span>
 			<div id="test-feedback-box" style="display:none; margin-top:10px; padding:12px; border-radius:4px; font-size:0.95em;"></div>
+		</div>
+	</div>
+
+	<!-- SECTION DE SECOURS (FALLBACK) -->
+	<legend><?= _t('ext.llm_classification.fallback.title') ?></legend>
+
+	<div class="form-group">
+		<label class="group-name" for="enable_fallback"><?= _t('ext.llm_classification.fallback.enable') ?></label>
+		<div class="group-controls">
+			<input type="checkbox" name="enable_fallback" id="enable_fallback" value="1" <?= $enableFallback ? 'checked' : '' ?> />
+			<p class="help"><?= _t('ext.llm_classification.fallback.enable_help') ?></p>
+		</div>
+	</div>
+
+	<div id="fallback-settings-panel" style="<?= $enableFallback ? '' : 'display:none;' ?>">
+		<div class="form-group">
+			<label class="group-name" for="fallback_provider"><?= _t('ext.llm_classification.fallback.provider') ?></label>
+			<div class="group-controls">
+				<select name="fallback_provider" id="fallback_provider" class="w100">
+					<?php foreach ($allProviders as $p): ?>
+						<option value="<?= $p->getId() ?>" <?= $p->getId() === $fallbackProviderId ? 'selected' : '' ?>>
+							<?= htmlspecialchars($p->getName(), ENT_COMPAT, 'UTF-8') ?>
+						</option>
+					<?php endforeach; ?>
+				</select>
+			</div>
+		</div>
+
+		<div class="form-group" id="group-fallback-api-url" style="<?= $fallbackProvider->requiresCustomUrl() ? '' : 'display:none;' ?>">
+			<label class="group-name" for="fallback_api_url"><?= _t('ext.llm_classification.api.url') ?></label>
+			<div class="group-controls">
+				<input type="url" name="fallback_api_url" id="fallback_api_url" class="w100"
+					placeholder="<?= htmlspecialchars($fallbackProvider->getPlaceholderUrl(), ENT_COMPAT, 'UTF-8') ?>"
+					value="<?= htmlspecialchars((string)($this->getConfigValue('fallback_api_url') ?? ''), ENT_COMPAT, 'UTF-8') ?>" />
+			</div>
+		</div>
+
+		<div class="form-group">
+			<label class="group-name" for="fallback_api_key"><?= _t('ext.llm_classification.api.key') ?></label>
+			<div class="group-controls">
+				<input type="password" name="fallback_api_key" id="fallback_api_key" class="w100" autocomplete="off"
+					value="<?= htmlspecialchars((string)($this->getConfigValue('fallback_api_key') ?? ''), ENT_COMPAT, 'UTF-8') ?>" />
+			</div>
+		</div>
+
+		<div class="form-group">
+			<label class="group-name" for="fallback_model"><?= _t('ext.llm_classification.api.model') ?></label>
+			<div class="group-controls">
+				<input type="text" name="fallback_model" id="fallback_model" class="w100"
+					placeholder="<?= htmlspecialchars($fallbackProvider->getPlaceholderModel(), ENT_COMPAT, 'UTF-8') ?>"
+					value="<?= htmlspecialchars((string)($this->getConfigValue('fallback_model') ?? $fallbackProvider->getDefaultModel()), ENT_COMPAT, 'UTF-8') ?>" />
+			</div>
+		</div>
+
+		<div class="form-group">
+			<label class="group-name"></label>
+			<div class="group-controls">
+				<button type="button" id="btn-test-fallback" class="btn">
+					⚡ <?= _t('ext.llm_classification.fallback.test_btn') ?>
+				</button>
+				<span id="test-fallback-spinner" style="display:none; margin-left:10px;">⏳ <?= _t('ext.llm_classification.api.test_in_progress') ?></span>
+				<div id="test-fallback-feedback" style="display:none; margin-top:10px; padding:12px; border-radius:4px; font-size:0.95em;"></div>
+			</div>
+		</div>
+	</div>
+
+	<!-- PARAMÈTRES TECHNIQUES -->
+	<legend><?= _t('ext.llm_classification.api.advanced_title') ?></legend>
+
+	<div class="form-group">
+		<label class="group-name" for="timeout"><?= _t('ext.llm_classification.api.timeout') ?></label>
+		<div class="group-controls">
+			<input type="number" name="timeout" id="timeout" min="1" max="300"
+				value="<?= (int)($this->getConfigValue('timeout') ?? LlmClassificationExtension::DEFAULT_TIMEOUT) ?>" />
 		</div>
 	</div>
 
@@ -89,6 +160,16 @@
 		</div>
 	</div>
 
+	<div class="form-group">
+		<label class="group-name" for="allow_thinking"><?= _t('ext.llm_classification.api.allow_thinking') ?></label>
+		<div class="group-controls">
+			<input type="checkbox" name="allow_thinking" id="allow_thinking" value="1" <?=
+				$this->getConfigValue('allow_thinking') ? 'checked' : '' ?> />
+			<p class="help"><?= _t('ext.llm_classification.api.allow_thinking_help') ?></p>
+		</div>
+	</div>
+
+	<!-- PROMPTS -->
 	<legend><?= _t('ext.llm_classification.prompts.title') ?></legend>
 
 	<div class="form-group">
@@ -119,6 +200,7 @@
 		</div>
 	</div>
 
+	<!-- TAGS -->
 	<legend><?= _t('ext.llm_classification.tags.title') ?></legend>
 
 	<div class="form-group">
@@ -148,6 +230,7 @@
 		</div>
 	</div>
 
+	<!-- FILTRES -->
 	<legend><?= _t('ext.llm_classification.filter.title') ?></legend>
 
 	<div class="form-group">
@@ -158,15 +241,6 @@
 			?></textarea>
 			<p class="help"><?= _t('ext.llm_classification.filter.search_help') ?></p>
 			<p class="help"><?= _i('help') ?> <?= _t('sub.feed.filteractions.help') ?></p>
-		</div>
-	</div>
-
-	<div class="form-group">
-		<label class="group-name" for="allow_thinking"><?= _t('ext.llm_classification.api.allow_thinking') ?></label>
-		<div class="group-controls">
-			<input type="checkbox" name="allow_thinking" id="allow_thinking" value="1" <?=
-				$this->getConfigValue('allow_thinking') ? 'checked' : '' ?> />
-			<p class="help"><?= _t('ext.llm_classification.api.allow_thinking_help') ?></p>
 		</div>
 	</div>
 
@@ -191,59 +265,71 @@ document.addEventListener('DOMContentLoaded', function() {
 		<?php endforeach; ?>
 	};
 
-	const providerSelect = document.getElementById('provider');
-	const urlGroup = document.getElementById('group-api-url');
-	const urlInput = document.getElementById('api_url');
-	const modelInput = document.getElementById('model');
+	// Sélecteur principal
+	const pSelect = document.getElementById('provider');
+	const pUrlGroup = document.getElementById('group-api-url');
+	const pUrlInput = document.getElementById('api_url');
+	const pModelInput = document.getElementById('model');
 
-	function updateUiForProvider() {
-		const meta = providerMeta[providerSelect.value];
+	function updatePrimaryUi() {
+		const meta = providerMeta[pSelect.value];
 		if (!meta) return;
-
-		if (meta.requiresUrl) {
-			urlGroup.style.display = '';
-			urlInput.placeholder = meta.placeholderUrl;
-		} else {
-			urlGroup.style.display = 'none';
-		}
-		modelInput.placeholder = meta.placeholderModel;
+		pUrlGroup.style.display = meta.requiresUrl ? '' : 'none';
+		if (meta.requiresUrl) pUrlInput.placeholder = meta.placeholderUrl;
+		pModelInput.placeholder = meta.placeholderModel;
 	}
+	pSelect.addEventListener('change', updatePrimaryUi);
 
-	providerSelect.addEventListener('change', updateUiForProvider);
+	// Sélecteur de secours (Fallback)
+	const chkFallback = document.getElementById('enable_fallback');
+	const panelFallback = document.getElementById('fallback-settings-panel');
+	const fbSelect = document.getElementById('fallback_provider');
+	const fbUrlGroup = document.getElementById('group-fallback-api-url');
+	const fbUrlInput = document.getElementById('fallback_api_url');
+	const fbModelInput = document.getElementById('fallback_model');
 
-	const btnTest = document.getElementById('btn-test-connection');
-	const spinner = document.getElementById('test-spinner');
-	const feedback = document.getElementById('test-feedback-box');
+	chkFallback.addEventListener('change', () => {
+		panelFallback.style.display = chkFallback.checked ? '' : 'none';
+	});
+
+	function updateFallbackUi() {
+		const meta = providerMeta[fbSelect.value];
+		if (!meta) return;
+		fbUrlGroup.style.display = meta.requiresUrl ? '' : 'none';
+		if (meta.requiresUrl) fbUrlInput.placeholder = meta.placeholderUrl;
+		fbModelInput.placeholder = meta.placeholderModel;
+	}
+	fbSelect.addEventListener('change', updateFallbackUi);
+
+	// Fonction de test réseau
 	const form = document.getElementById('llm-config-form');
+	const csrf = document.getElementById('_csrf').value;
 
-	btnTest.addEventListener('click', function() {
-		btnTest.disabled = true;
+	function runTest(btn, spinner, feedback, getParams) {
+		btn.disabled = true;
 		spinner.style.display = 'inline';
 		feedback.style.display = 'none';
 
-		const controller = new AbortController();
-		const timeoutId = setTimeout(() => controller.abort(), 12000);
+		const ctrl = new AbortController();
+		const tid = setTimeout(() => ctrl.abort(), 12000);
 
-		const formData = new FormData();
-		formData.append('action', 'test_connection');
-		formData.append('_csrf', document.getElementById('_csrf').value);
-		formData.append('provider', providerSelect.value);
-		formData.append('api_url', urlInput.value);
-		formData.append('api_key', document.getElementById('api_key').value);
-		formData.append('model', modelInput.value);
-		formData.append('timeout', '8');
+		const fd = new FormData();
+		fd.append('action', 'test_connection');
+		fd.append('_csrf', csrf);
+		const params = getParams();
+		for (const [k, v] of Object.entries(params)) {
+			fd.append(k, v);
+		}
 
 		fetch(form.action, {
 			method: 'POST',
-			body: formData,
+			body: fd,
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			signal: controller.signal
+			signal: ctrl.signal
 		})
 		.then(res => {
-			clearTimeout(timeoutId);
-			if (!res.ok) {
-				throw new Error('Erreur HTTP serveur : ' + res.status);
-			}
+			clearTimeout(tid);
+			if (!res.ok) throw new Error('Erreur HTTP serveur : ' + res.status);
 			return res.json();
 		})
 		.then(data => {
@@ -261,21 +347,49 @@ document.addEventListener('DOMContentLoaded', function() {
 			}
 		})
 		.catch(err => {
-			clearTimeout(timeoutId);
+			clearTimeout(tid);
 			feedback.style.display = 'block';
 			feedback.style.background = '#f8d7da';
 			feedback.style.color = '#721c24';
 			feedback.style.border = '1px solid #f5c6cb';
-			if (err.name === 'AbortError') {
-				feedback.innerHTML = '<strong>❌ Délai d’attente dépassé</strong><br>Le serveur n’a pas répondu en 12 secondes. Vérifiez l’URL de l’API et vos connexions sortantes.';
-			} else {
-				feedback.innerHTML = '<strong>❌ Erreur</strong><br>' + err.message;
-			}
+			feedback.innerHTML = '<strong>❌ Erreur</strong><br>' + (err.name === 'AbortError' ? 'Délai d’attente dépassé (12s).' : err.message);
 		})
 		.finally(() => {
-			btnTest.disabled = false;
+			btn.disabled = false;
 			spinner.style.display = 'none';
 		});
+	}
+
+	// Test Moteur Principal
+	document.getElementById('btn-test-connection').addEventListener('click', function() {
+		runTest(
+			this,
+			document.getElementById('test-spinner'),
+			document.getElementById('test-feedback-box'),
+			() => ({
+				provider: pSelect.value,
+				api_url: pUrlInput.value,
+				api_key: document.getElementById('api_key').value,
+				model: pModelInput.value,
+				timeout: '8'
+			})
+		);
+	});
+
+	// Test Moteur Secours
+	document.getElementById('btn-test-fallback').addEventListener('click', function() {
+		runTest(
+			this,
+			document.getElementById('test-fallback-spinner'),
+			document.getElementById('test-fallback-feedback'),
+			() => ({
+				provider: fbSelect.value,
+				api_url: fbUrlInput.value,
+				api_key: document.getElementById('fallback_api_key').value,
+				model: fbModelInput.value,
+				timeout: '8'
+			})
+		);
 	});
 });
 </script>
