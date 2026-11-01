@@ -97,7 +97,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Construit le prompt système imposant une sortie JSON stricte.
+	 * Build the system prompt that constrains the LLM to return a specific JSON structure.
 	 */
 	public function getSystemPrompt(): string {
 		$prompt = <<<'PROMPT'
@@ -133,14 +133,13 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Nettoie le HTML d'un article et convertit les blocs en texte lisible.
+	 * Clean article HTML and separate blocks to prevent word gluing.
 	 */
 	private function sanitizeArticleContent(string $rawHtml): string {
 		if ($rawHtml === '') {
 			return '';
 		}
 
-		// Ajout d'espaces / sauts de ligne autour des balises de bloc pour éviter la fusion de mots
 		$text = preg_replace('/<(?:br|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/i', "$0\n", $rawHtml) ?? $rawHtml;
 		$text = strip_tags($text);
 		$text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
@@ -151,7 +150,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Génère l'invite utilisateur en remplaçant les variables de contexte.
+	 * Build the user prompt by replacing placeholders with entry values.
 	 */
 	private function buildUserPrompt(FreshRSS_Entry $entry): string {
 		$template = $this->hasFile(self::PROMPT_FILENAME)
@@ -185,7 +184,8 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Vérifie la correspondance avec les filtres de recherche sans interrompre le flux en cas de syntaxe erronée.
+	 * Check whether the entry matches the configured search filter.
+	 * Catches malformed user query exceptions to avoid breaking feed refresh.
 	 */
 	private function entryMatchesSearchFilter(FreshRSS_Entry $entry): bool {
 		$filterStr = $this->getUserConfigurationString('search_filter') ?? '';
@@ -201,7 +201,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 					return true;
 				}
 			} catch (\Throwable $e) {
-				Minz_Log::warning('LlmClassification: Filtre de recherche invalide « ' . $line . ' » : ' . $e->getMessage());
+				Minz_Log::warning('LlmClassification: Invalid search filter “' . $line . '”: ' . $e->getMessage());
 			}
 		}
 
@@ -209,8 +209,8 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Construit le format de réponse strict.
-	 * Note : OpenAI Structured Outputs interdit uniqueItems et maxItems en mode strict.
+	 * Build the response_format payload for the API request.
+	 * OpenAI strict JSON schema disallows uniqueItems and maxItems.
 	 * @return array<string, mixed>
 	 */
 	private function buildResponseFormat(): array {
@@ -258,18 +258,16 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Extrait et décode la charge utile JSON même si le LLM renvoie des blocs Markdown.
+	 * Extract and parse JSON even if surrounded by markdown blocks or noise text.
 	 * @return array{tags: list<string>}|null
 	 */
 	private static function parseClassificationJson(string $rawContent): ?array {
 		$clean = trim($rawContent);
 
-		// Nettoyage des balises Markdown ```json ... ```
 		if (preg_match('/^```(?:json)?\s*([\s\S]*?)\s*```$/i', $clean, $matches)) {
 			$clean = trim($matches[1]);
 		}
 
-		// Recherche d'un bloc JSON englobant si du texte superflu précède ou suit
 		if (!str_starts_with($clean, '{') && preg_match('/\{[\s\S]*"tags"[\s\S]*\}/', $clean, $matches)) {
 			$clean = $matches[0];
 		}
@@ -288,7 +286,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Exécute la requête HTTP vers l'API OpenAI compatible.
+	 * Call the LLM API and return the parsed classification result.
 	 * @return array{tags: list<string>}|null
 	 */
 	private function callLlm(string $systemPrompt, string $userPrompt): ?array {
@@ -325,7 +323,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 		$requestBody = json_encode($body, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 		if ($requestBody === false) {
-			Minz_Log::warning('LlmClassification: Échec de l’encodage JSON de la requête');
+			Minz_Log::warning('LlmClassification: Failed to encode request body');
 			return null;
 		}
 
@@ -343,7 +341,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$httpStatus = 0;
 
 		for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
-			$response = FreshRSS_http_Util::httpGet($url, $cachePath, 86400 * 30, 'json', [
+			$response = FreshRSS_http_Util::httpGet($url, $cachePath, type: 'json', curl_options: [
 				CURLOPT_POST => true,
 				CURLOPT_POSTFIELDS => $requestBody,
 				CURLOPT_HTTPHEADER => $headers,
@@ -361,26 +359,27 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 			if ($attempt < $maxRetries && self::isRetryableFailure($response)) {
 				$delay = (int)pow(2, $attempt);
-				Minz_Log::warning('LlmClassification: Erreur API (HTTP ' . $httpStatus
+				Minz_Log::warning('LlmClassification: API call failed (HTTP ' . $httpStatus
 					. (($response['error'] ?? '') !== '' ? '; ' . $response['error'] : '')
-					. '), nouvel essai ' . ($attempt + 1) . '/' . $maxRetries . ' dans ' . $delay . 's');
+					. '), retry ' . ($attempt + 1) . '/' . $maxRetries . ' after ' . $delay . 's');
 				sleep($delay);
 				continue;
 			}
 
-			Minz_Log::warning('LlmClassification: Échec définitif pour ' . $url . ' (HTTP ' . $httpStatus . ')');
+			Minz_Log::warning('LlmClassification: API call failed for ' . $url . ' (HTTP ' . $httpStatus . '), not retrying');
 			return null;
 		}
 
 		if ($response === null || ($response['fail'] ?? false) || !is_string($response['body'] ?? null) || $response['body'] === '') {
 			@unlink($cachePath);
+			Minz_Log::warning('LlmClassification: API call failed after ' . (1 + $maxRetries) . ' attempt(s) for ' . $url . ' (HTTP ' . $httpStatus . ')');
 			return null;
 		}
 
 		$responseData = json_decode($response['body'], true);
 		if (!is_array($responseData)) {
 			@unlink($cachePath);
-			Minz_Log::warning('LlmClassification: JSON invalide renvoyé par le fournisseur API (HTTP ' . $httpStatus . ')');
+			Minz_Log::warning('LlmClassification: Invalid JSON response from API! (HTTP ' . $httpStatus . ')');
 			return null;
 		}
 
@@ -390,21 +389,21 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 		if (!is_string($content)) {
 			@unlink($cachePath);
-			Minz_Log::warning('LlmClassification: Clé `choices[0].message.content` introuvable dans la réponse');
+			Minz_Log::warning('LlmClassification: Missing `choices[0].message.content` in API response! (HTTP ' . $httpStatus . ')');
 			return null;
 		}
 
 		$finishReason = is_array($choice) ? (string)($choice['finish_reason'] ?? 'stop') : '?';
 		if ($finishReason === 'length') {
-			Minz_Log::warning('LlmClassification: Réponse tronquée par `max_tokens`. Augmentez la valeur dans les paramètres.');
+			Minz_Log::warning('LlmClassification: Response truncated due to `max_tokens`. Consider increasing it.');
 		} elseif ($finishReason !== 'stop') {
-			Minz_Log::warning('LlmClassification: Fin de génération inattendue avec finish_reason « ' . $finishReason . ' »');
+			Minz_Log::warning('LlmClassification: API terminated prematurely with finish_reason “' . $finishReason . '”! (HTTP ' . $httpStatus . ')');
 		}
 
 		$parsed = self::parseClassificationJson($content);
 		if ($parsed === null) {
 			@unlink($cachePath);
-			Minz_Log::warning('LlmClassification: Impossible d’extraire les tags JSON du contenu renvoyé : ' . mb_substr($content, 0, 300));
+			Minz_Log::warning('LlmClassification: LLM returned invalid JSON structure! `' . mb_substr($content, 0, 300) . '` (HTTP ' . $httpStatus . ')');
 			return null;
 		}
 
@@ -412,7 +411,8 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Applique les tags validés à l'article sans altérer les tags d'origine du flux.
+	 * Apply classification results to an entry.
+	 * Keeps tags as raw UTF-8 text (FreshRSS escapes HTML on output).
 	 * @param array<string, mixed> $classification
 	 */
 	private function applyClassification(FreshRSS_Entry $entry, array $classification, bool $removeOldTags): FreshRSS_Entry {
@@ -444,7 +444,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 				continue;
 			}
 
-			// Stockage direct en texte brut : FreshRSS gère l'échappement HTML à l'affichage
 			$newTags[] = $prefix . $tag;
 		}
 
@@ -453,7 +452,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 	}
 
 	/**
-	 * Récupère l'article existant en base pour comparer l'empreinte en cas de mise à jour.
+	 * Look up the currently stored entry for an entry being updated.
 	 */
 	private function loadExistingEntry(FreshRSS_Entry $incomingEntry): ?FreshRSS_Entry {
 		$feedId = $incomingEntry->feedId();
@@ -466,13 +465,13 @@ final class LlmClassificationExtension extends Minz_Extension {
 			$entryDAO = FreshRSS_Factory::createEntryDao();
 			return $entryDAO->searchByGuid($feedId, $guid);
 		} catch (\Throwable $e) {
-			Minz_Log::warning('LlmClassification: Échec de recherche de l’article existant : ' . $e->getMessage());
+			Minz_Log::warning('LlmClassification: Failed to load existing entry for re-classification: ' . $e->getMessage());
 			return null;
 		}
 	}
 
 	/**
-	 * Crochet Minz_HookType::EntryBeforeInsert.
+	 * Hook for EntryBeforeInsert: classify a new entry.
 	 */
 	public function classifyEntry(FreshRSS_Entry $entry): FreshRSS_Entry {
 		$enableTags = $this->getUserConfigurationBool('enable_tags') ?? false;
