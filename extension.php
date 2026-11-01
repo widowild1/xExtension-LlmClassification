@@ -17,10 +17,13 @@ final class LlmClassificationExtension extends Minz_Extension {
 	public const DEFAULT_MAX_CONTENT_LENGTH = 4000;
 	public const DEFAULT_MAX_TOKENS = 512;
 	public const DEFAULT_MAX_RETRIES = 2;
+	public const COOLDOWN_DURATION = 180; // 3 minutes de mise en quarantaine en cas de 429
 	private const RETRYABLE_HTTP_STATUSES = [429, 500, 502, 503, 504];
 	private const PROMPT_FILENAME = 'prompt.md';
 	private const ATTRIBUTE_PROMPT_HASH = 'prompt_hash';
 
+	private static int $primaryCooldownUntil = 0;
+	private int $lastHttpStatus = 0;
 	public string $user_prompt = '';
 
 	public function init(): void {
@@ -31,10 +34,20 @@ final class LlmClassificationExtension extends Minz_Extension {
 			: 'entry_before_insert';
 		$this->registerHook($hook, [$this, 'classifyEntry']);
 
+		// Moteur principal
 		$this->initDefaultConfig('provider', 'gemini');
 		$this->initDefaultConfig('api_url', '');
 		$this->initDefaultConfig('api_key', '');
 		$this->initDefaultConfig('model', 'gemini-3.5-flash');
+
+		// Moteur de secours (Fallback)
+		$this->initDefaultConfig('enable_fallback', false);
+		$this->initDefaultConfig('fallback_provider', 'ollama');
+		$this->initDefaultConfig('fallback_api_url', '');
+		$this->initDefaultConfig('fallback_api_key', '');
+		$this->initDefaultConfig('fallback_model', 'llama3.1');
+
+		// Paramètres généraux
 		$this->initDefaultConfig('max_content_length', self::DEFAULT_MAX_CONTENT_LENGTH);
 		$this->initDefaultConfig('timeout', self::DEFAULT_TIMEOUT);
 		$this->initDefaultConfig('enable_tags', false);
@@ -94,6 +107,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 				exit;
 			}
 
+			// Configuration Principale
 			$this->setConfigValue('provider', trim(Minz_Request::paramString('provider', plaintext: true)));
 			$apiUrl = trim(Minz_Request::paramString('api_url', plaintext: true));
 			$apiUrl = preg_replace('#/chat/completions/?$#i', '', $apiUrl) ?? $apiUrl;
@@ -101,6 +115,16 @@ final class LlmClassificationExtension extends Minz_Extension {
 			$this->setConfigValue('api_key', trim(Minz_Request::paramString('api_key', plaintext: true)));
 			$this->setConfigValue('model', trim(Minz_Request::paramString('model', plaintext: true)));
 
+			// Configuration Secours
+			$this->setConfigValue('enable_fallback', Minz_Request::paramBoolean('enable_fallback'));
+			$this->setConfigValue('fallback_provider', trim(Minz_Request::paramString('fallback_provider', plaintext: true)));
+			$fallbackUrl = trim(Minz_Request::paramString('fallback_api_url', plaintext: true));
+			$fallbackUrl = preg_replace('#/chat/completions/?$#i', '', $fallbackUrl) ?? $fallbackUrl;
+			$this->setConfigValue('fallback_api_url', $fallbackUrl);
+			$this->setConfigValue('fallback_api_key', trim(Minz_Request::paramString('fallback_api_key', plaintext: true)));
+			$this->setConfigValue('fallback_model', trim(Minz_Request::paramString('fallback_model', plaintext: true)));
+
+			// Paramètres globaux
 			$userPrompt = trim(Minz_Request::paramString('user_prompt', plaintext: true))
 				?: _t('ext.llm_classification.default_prompt');
 			$this->saveFile(self::PROMPT_FILENAME, $userPrompt);
@@ -158,7 +182,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 		if ($curlError === '' && $status >= 200 && $status < 300 && is_string($responseBody)) {
 			$data = json_decode($responseBody, true);
 			$reply = $data['choices'][0]['message']['content'] ?? 'OK';
-			$successMsg = sprintf('Succès (%s) en %.2fs. Réponse du modèle : « %s »', $provider->getName(), $latency, trim((string)$reply));
+			$successMsg = sprintf('Succès (%s) en %.2fs. Réponse : « %s »', $provider->getName(), $latency, trim((string)$reply));
 
 			Minz_Log::notice('LlmClassification [Test Connexion] ' . $successMsg);
 
@@ -332,12 +356,21 @@ final class LlmClassificationExtension extends Minz_Extension {
 		return null;
 	}
 
-	private function callLlm(string $systemPrompt, string $userPrompt): ?array {
-		$providerId = (string)($this->getConfigValue('provider') ?? 'gemini');
-		$configuredUrl = (string)($this->getConfigValue('api_url') ?? '');
-		$apiKey = trim((string)($this->getConfigValue('api_key') ?? ''));
-		$configuredModel = trim((string)($this->getConfigValue('model') ?? ''));
+	/**
+	 * Exécute un appel cURL vers un fournisseur d'IA précis.
+	 */
+	private function executeProviderCall(
+		string $providerId,
+		string $configuredUrl,
+		string $apiKey,
+		string $configuredModel,
+		string $systemPrompt,
+		string $userPrompt
+	): ?array {
 		$timeout = (int)($this->getConfigValue('timeout') ?? self::DEFAULT_TIMEOUT);
+		$maxRetries = (int)($this->getConfigValue('max_retries') ?? self::DEFAULT_MAX_RETRIES);
+		$maxTokens = (int)($this->getConfigValue('max_tokens') ?? self::DEFAULT_MAX_TOKENS);
+		$allowThinking = (bool)($this->getConfigValue('allow_thinking') ?? true);
 
 		$provider = LlmProviderFactory::get($providerId);
 		$url = $provider->getChatCompletionsUrl($configuredUrl);
@@ -346,9 +379,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 		if ($providerId === 'gemini' && (str_contains($model, 'gemini-1.5') || $model === '')) {
 			$model = 'gemini-3.5-flash';
 		}
-
-		$maxTokens = (int)($this->getConfigValue('max_tokens') ?? self::DEFAULT_MAX_TOKENS);
-		$allowThinking = (bool)($this->getConfigValue('allow_thinking') ?? true);
 
 		$body = $provider->buildRequestBody(
 			$model,
@@ -377,9 +407,8 @@ final class LlmClassificationExtension extends Minz_Extension {
 			}
 		}
 
-		$maxRetries = (int)($this->getConfigValue('max_retries') ?? self::DEFAULT_MAX_RETRIES);
 		$responseBody = null;
-		$httpStatus = 0;
+		$this->lastHttpStatus = 0;
 
 		for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
 			$ch = curl_init();
@@ -395,23 +424,24 @@ final class LlmClassificationExtension extends Minz_Extension {
 			]);
 
 			$responseBody = curl_exec($ch);
-			$httpStatus = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+			$this->lastHttpStatus = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 			$curlError = curl_error($ch);
 			curl_close($ch);
 
-			if ($curlError === '' && $httpStatus >= 200 && $httpStatus < 300 && is_string($responseBody) && $responseBody !== '') {
+			if ($curlError === '' && $this->lastHttpStatus >= 200 && $this->lastHttpStatus < 300 && is_string($responseBody) && $responseBody !== '') {
 				break;
 			}
 
-			if ($attempt < $maxRetries && in_array($httpStatus, self::RETRYABLE_HTTP_STATUSES, true)) {
-				$delay = (int)pow(2, $attempt);
-				Minz_Log::warning(sprintf('LlmClassification: Erreur transitoire %s (HTTP %d). Réessai %d/%d dans %ds', $provider->getName(), $httpStatus, $attempt + 1, $maxRetries, $delay));
+			// Gestion du réessai avec pause prolongée si 429
+			if ($attempt < $maxRetries && in_array($this->lastHttpStatus, self::RETRYABLE_HTTP_STATUSES, true)) {
+				$delay = ($this->lastHttpStatus === 429) ? 15 : (int)pow(2, $attempt);
+				Minz_Log::warning(sprintf('LlmClassification: Quota saturé ou incident %s (HTTP %d). Pause de %ds avant réessai %d/%d', $provider->getName(), $this->lastHttpStatus, $delay, $attempt + 1, $maxRetries));
 				sleep($delay);
 				continue;
 			}
 
-			$explanation = AbstractLlmProvider::explainHttpError($httpStatus, (string)$responseBody, $curlError);
-			Minz_Log::warning(sprintf('LlmClassification: Échec appel API sur %s (%s, HTTP %d) : %s', $url, $provider->getName(), $httpStatus, $explanation));
+			$explanation = AbstractLlmProvider::explainHttpError($this->lastHttpStatus, (string)$responseBody, $curlError);
+			Minz_Log::warning(sprintf('LlmClassification: Échec appel API sur %s (%s, HTTP %d) : %s', $url, $provider->getName(), $this->lastHttpStatus, $explanation));
 			return null;
 		}
 
@@ -421,7 +451,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 		$responseData = json_decode($responseBody, true);
 		if (!is_array($responseData)) {
-			Minz_Log::warning('LlmClassification: Réponse JSON invalide reçue de l’API (HTTP ' . $httpStatus . ')');
+			Minz_Log::warning('LlmClassification: Réponse JSON invalide reçue de l’API (HTTP ' . $this->lastHttpStatus . ')');
 			return null;
 		}
 
@@ -430,7 +460,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$content = is_array($choice) && is_array($choice['message'] ?? null) ? ($choice['message']['content'] ?? null) : null;
 
 		if (!is_string($content)) {
-			Minz_Log::warning('LlmClassification: Propriété `choices[0].message.content` introuvable dans la réponse API');
+			Minz_Log::warning('LlmClassification: Propriété `choices[0].message.content` introuvable dans la réponse');
 			return null;
 		}
 
@@ -442,6 +472,60 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 		@file_put_contents($cachePath, $content);
 		return $parsed;
+	}
+
+	/**
+	 * Orchestre l'appel LLM avec disjoncteur thermique et bascule de secours.
+	 */
+	private function callLlm(string $systemPrompt, string $userPrompt): ?array {
+		$enableFallback = (bool)($this->getConfigValue('enable_fallback') ?? false);
+		$primaryProvider = (string)($this->getConfigValue('provider') ?? 'gemini');
+		$now = time();
+
+		// Si le moteur principal est encore en période de quarantaine suite à un 429
+		if ($enableFallback && $now < self::$primaryCooldownUntil) {
+			$remaining = self::$primaryCooldownUntil - $now;
+			echo '[LLM Classification] ⚡ Quarantaine quota active (' . $remaining . 's). Utilisation directe du secours.' . PHP_EOL;
+			return $this->executeFallbackCall($systemPrompt, $userPrompt);
+		}
+
+		// Tentative sur le moteur principal
+		$primaryResult = $this->executeProviderCall(
+			$primaryProvider,
+			(string)($this->getConfigValue('api_url') ?? ''),
+			trim((string)($this->getConfigValue('api_key') ?? '')),
+			trim((string)($this->getConfigValue('model') ?? '')),
+			$systemPrompt,
+			$userPrompt
+		);
+
+		if ($primaryResult !== null) {
+			return $primaryResult;
+		}
+
+		// En cas d'échec du moteur principal (particulièrement HTTP 429)
+		if ($enableFallback) {
+			if ($this->lastHttpStatus === 429) {
+				self::$primaryCooldownUntil = time() + self::COOLDOWN_DURATION;
+				Minz_Log::warning(sprintf('LlmClassification: Quota épuisé sur %s (HTTP 429). Activation du disjoncteur pour %ds.', $primaryProvider, self::COOLDOWN_DURATION));
+			}
+
+			echo '[LLM Classification] ⚠ Bascule vers le moteur de secours...' . PHP_EOL;
+			return $this->executeFallbackCall($systemPrompt, $userPrompt);
+		}
+
+		return null;
+	}
+
+	private function executeFallbackCall(string $systemPrompt, string $userPrompt): ?array {
+		return $this->executeProviderCall(
+			(string)($this->getConfigValue('fallback_provider') ?? 'ollama'),
+			(string)($this->getConfigValue('fallback_api_url') ?? ''),
+			trim((string)($this->getConfigValue('fallback_api_key') ?? '')),
+			trim((string)($this->getConfigValue('fallback_model') ?? '')),
+			$systemPrompt,
+			$userPrompt
+		);
 	}
 
 	private function applyClassification(FreshRSS_Entry $entry, array $classification, bool $removeOldTags): FreshRSS_Entry {
@@ -548,6 +632,9 @@ final class LlmClassificationExtension extends Minz_Extension {
 		]);
 
 		$entry = $this->applyClassification($entry, $classification, removeOldTags: true);
+
+		// Pause préventive de 2 secondes
+		sleep(2);
 
 		$appliedTags = $classification['tags'] ?? [];
 		if (!empty($appliedTags)) {
