@@ -10,7 +10,7 @@ return array(
 			'key' => 'Clé API (Jeton)',
 			'key_help' => 'Jeton d’authentification (Bearer token). Requis pour Gemini, OpenAI et Mistral.',
 			'model' => 'Nom du modèle',
-			'model_help' => 'Modèle d’IA à interroger (ex. gemini-1.5-flash, gpt-4o-mini, llama3.1)',
+			'model_help' => 'Modèle d’IA à interroger (ex. gemini-3.5-flash, gpt-4o-mini, llama3.1)',
 			'timeout' => 'Délai d’attente (secondes)',
 			'test_btn' => 'Tester la connexion',
 			'test_in_progress' => 'Test en cours…',
