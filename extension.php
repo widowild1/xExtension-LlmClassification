@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-// Chargement sécurisé de tous les fichiers de moteurs
 require_once __DIR__ . '/providers/LlmProviderInterface.php';
 require_once __DIR__ . '/providers/AbstractLlmProvider.php';
 require_once __DIR__ . '/providers/OpenAiProvider.php';
@@ -35,7 +34,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$this->initDefaultConfig('provider', 'gemini');
 		$this->initDefaultConfig('api_url', '');
 		$this->initDefaultConfig('api_key', '');
-		$this->initDefaultConfig('model', 'gemini-1.5-flash');
+		$this->initDefaultConfig('model', 'gemini-3.5-flash');
 		$this->initDefaultConfig('max_content_length', self::DEFAULT_MAX_CONTENT_LENGTH);
 		$this->initDefaultConfig('timeout', self::DEFAULT_TIMEOUT);
 		$this->initDefaultConfig('enable_tags', false);
@@ -80,14 +79,13 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$this->registerTranslates();
 
 		if (Minz_Request::isPost()) {
-			// Gestion de la requête AJAX de test de connexion
 			if (Minz_Request::paramString('action') === 'test_connection') {
 				FreshRSS_Auth::checkCsrf();
 				$providerId = trim(Minz_Request::paramString('provider', plaintext: true));
 				$apiUrl     = trim(Minz_Request::paramString('api_url', plaintext: true));
 				$apiKey     = trim(Minz_Request::paramString('api_key', plaintext: true));
 				$model      = trim(Minz_Request::paramString('model', plaintext: true));
-				$timeout    = max(2, min(60, Minz_Request::paramInt('timeout') ?: 15));
+				$timeout    = max(3, min(30, Minz_Request::paramInt('timeout') ?: 10));
 
 				$testResult = $this->testConnection($providerId, $apiUrl, $apiKey, $model, $timeout);
 
@@ -96,7 +94,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 				exit;
 			}
 
-			// Sauvegarde du formulaire de configuration
 			$this->setConfigValue('provider', trim(Minz_Request::paramString('provider', plaintext: true)));
 			$apiUrl = trim(Minz_Request::paramString('api_url', plaintext: true));
 			$apiUrl = preg_replace('#/chat/completions/?$#i', '', $apiUrl) ?? $apiUrl;
@@ -124,10 +121,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 			: _t('ext.llm_classification.default_prompt');
 	}
 
-	/**
-	 * Exécute un test de connexion direct et consigne le résultat détaillé dans les journaux.
-	 * @return array{success:bool, code:int, message:string, detail:string, latency?:float}
-	 */
 	private function testConnection(string $providerId, string $apiUrl, string $apiKey, string $model, int $timeout): array {
 		$provider = LlmProviderFactory::get($providerId);
 		$url = $provider->getChatCompletionsUrl($apiUrl);
@@ -138,32 +131,34 @@ final class LlmClassificationExtension extends Minz_Extension {
 			'messages' => [
 				['role' => 'user', 'content' => 'Réponds uniquement par le mot OK'],
 			],
-			'max_completion_tokens' => 16,
+			'max_completion_tokens' => 100,
 		];
 
 		$requestBody = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-		$cachePath = CACHE_PATH . '/llm_test_' . bin2hex(random_bytes(8)) . '.json';
-		$start = microtime(true);
 
-		$response = FreshRSS_http_Util::httpGet($url, $cachePath, 0, 'json', [
+		$ch = curl_init();
+		curl_setopt_array($ch, [
+			CURLOPT_URL => $url,
 			CURLOPT_POST => true,
 			CURLOPT_POSTFIELDS => $requestBody,
 			CURLOPT_HTTPHEADER => $headers,
+			CURLOPT_RETURNTRANSFER => true,
 			CURLOPT_CONNECTTIMEOUT => 5,
 			CURLOPT_TIMEOUT => $timeout,
+			CURLOPT_SSL_VERIFYPEER => true,
 		]);
 
+		$start = microtime(true);
+		$responseBody = curl_exec($ch);
 		$latency = round(microtime(true) - $start, 2);
-		@unlink($cachePath);
+		$status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		$curlError = curl_error($ch);
+		curl_close($ch);
 
-		$status = (int)($response['status'] ?? 0);
-		$responseBody = (string)($response['body'] ?? '');
-		$curlError = (string)($response['error'] ?? '');
-
-		if (!($response['fail'] ?? false) && $status >= 200 && $status < 300) {
+		if ($curlError === '' && $status >= 200 && $status < 300 && is_string($responseBody)) {
 			$data = json_decode($responseBody, true);
-			$reply = $data['choices'][0]['message']['content'] ?? 'Réponse reçue';
-			$successMsg = sprintf('Succès (%s) en %.2fs. Modèle : « %s »', $provider->getName(), $latency, trim((string)$reply));
+			$reply = $data['choices'][0]['message']['content'] ?? 'OK';
+			$successMsg = sprintf('Succès (%s) en %.2fs. Réponse du modèle : « %s »', $provider->getName(), $latency, trim((string)$reply));
 
 			Minz_Log::notice('LlmClassification [Test Connexion] ' . $successMsg);
 
@@ -176,17 +171,8 @@ final class LlmClassificationExtension extends Minz_Extension {
 			];
 		}
 
-		// Gestion de l'échec et explicitation
-		$explanation = AbstractLlmProvider::explainHttpError($status, $responseBody, $curlError);
-		$logError = sprintf(
-			'LlmClassification [Test Connexion] Échec avec %s (HTTP %d) sur %s : %s',
-			$provider->getName(),
-			$status,
-			$url,
-			$explanation
-		);
-
-		Minz_Log::warning($logError);
+		$explanation = AbstractLlmProvider::explainHttpError($status, (string)$responseBody, $curlError);
+		Minz_Log::warning(sprintf('LlmClassification [Test Connexion] Échec avec %s (HTTP %d) sur %s : %s', $provider->getName(), $status, $url, $explanation));
 
 		return [
 			'success' => false,
@@ -214,9 +200,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 		return $prompt;
 	}
 
-	/**
-	 * @return list<string>
-	 */
 	private function getAllowedTagsList(): array {
 		$allowedTagsStr = (string)($this->getConfigValue('allowed_tags') ?? '');
 		if ($allowedTagsStr === '') {
@@ -295,9 +278,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 		return false;
 	}
 
-	/**
-	 * @return array<string, mixed>
-	 */
 	private function buildResponseFormat(): array {
 		$allowedTags = $this->getAllowedTagsList();
 
@@ -328,23 +308,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 		];
 	}
 
-	/**
-	 * @param array{fail?:bool,status?:int,error?:string} $response
-	 */
-	private static function isRetryableFailure(array $response): bool {
-		if (!($response['fail'] ?? false)) {
-			return false;
-		}
-		if (($response['status'] ?? 0) === 0 && ($response['error'] ?? '') !== '') {
-			return true;
-		}
-
-		return in_array($response['status'] ?? 0, self::RETRYABLE_HTTP_STATUSES, true);
-	}
-
-	/**
-	 * @return array{tags: list<string>}|null
-	 */
 	private static function parseClassificationJson(string $rawContent): ?array {
 		$clean = trim($rawContent);
 
@@ -369,9 +332,6 @@ final class LlmClassificationExtension extends Minz_Extension {
 		return null;
 	}
 
-	/**
-	 * @return array{tags: list<string>}|null
-	 */
 	private function callLlm(string $systemPrompt, string $userPrompt): ?array {
 		$providerId = (string)($this->getConfigValue('provider') ?? 'gemini');
 		$configuredUrl = (string)($this->getConfigValue('api_url') ?? '');
@@ -382,6 +342,10 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$provider = LlmProviderFactory::get($providerId);
 		$url = $provider->getChatCompletionsUrl($configuredUrl);
 		$model = $configuredModel !== '' ? $configuredModel : $provider->getDefaultModel();
+
+		if ($providerId === 'gemini' && (str_contains($model, 'gemini-1.5') || $model === '')) {
+			$model = 'gemini-3.5-flash';
+		}
 
 		$maxTokens = (int)($this->getConfigValue('max_tokens') ?? self::DEFAULT_MAX_TOKENS);
 		$allowThinking = (bool)($this->getConfigValue('allow_thinking') ?? true);
@@ -397,66 +361,66 @@ final class LlmClassificationExtension extends Minz_Extension {
 
 		$requestBody = json_encode($body, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 		if ($requestBody === false) {
-			Minz_Log::warning('LlmClassification: Échec de l’encodage JSON de la requête');
+			Minz_Log::warning('LlmClassification: Échec d’encodage JSON');
 			return null;
 		}
 
 		$headers = $provider->buildHeaders($apiKey);
 		$cachePath = CACHE_PATH . '/llm_classification_' . sha1($url . $apiKey . $model . $requestBody) . '.json';
+		if (file_exists($cachePath) && (time() - (int)@filemtime($cachePath) < 86400 * 30)) {
+			$cached = @file_get_contents($cachePath);
+			if (is_string($cached) && $cached !== '') {
+				$parsed = self::parseClassificationJson($cached);
+				if ($parsed !== null) {
+					return $parsed;
+				}
+			}
+		}
+
 		$maxRetries = (int)($this->getConfigValue('max_retries') ?? self::DEFAULT_MAX_RETRIES);
-		$response = null;
+		$responseBody = null;
 		$httpStatus = 0;
 
 		for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
-			$response = FreshRSS_http_Util::httpGet($url, $cachePath, 86400 * 30, 'json', [
+			$ch = curl_init();
+			curl_setopt_array($ch, [
+				CURLOPT_URL => $url,
 				CURLOPT_POST => true,
 				CURLOPT_POSTFIELDS => $requestBody,
 				CURLOPT_HTTPHEADER => $headers,
+				CURLOPT_RETURNTRANSFER => true,
 				CURLOPT_CONNECTTIMEOUT => 5,
 				CURLOPT_TIMEOUT => $timeout,
+				CURLOPT_SSL_VERIFYPEER => true,
 			]);
 
-			$httpStatus = (int)($response['status'] ?? 0);
+			$responseBody = curl_exec($ch);
+			$httpStatus = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+			$curlError = curl_error($ch);
+			curl_close($ch);
 
-			if (!($response['fail'] ?? false) && ($response['body'] ?? '') !== '') {
+			if ($curlError === '' && $httpStatus >= 200 && $httpStatus < 300 && is_string($responseBody) && $responseBody !== '') {
 				break;
 			}
 
-			@unlink($cachePath);
-
-			if ($attempt < $maxRetries && self::isRetryableFailure($response)) {
+			if ($attempt < $maxRetries && in_array($httpStatus, self::RETRYABLE_HTTP_STATUSES, true)) {
 				$delay = (int)pow(2, $attempt);
-				Minz_Log::warning(sprintf(
-					'LlmClassification: Erreur transitoire %s (HTTP %d). Nouvel essai %d/%d dans %ds',
-					$provider->getName(),
-					$httpStatus,
-					$attempt + 1,
-					$maxRetries,
-					$delay
-				));
+				Minz_Log::warning(sprintf('LlmClassification: Erreur transitoire %s (HTTP %d). Réessai %d/%d dans %ds', $provider->getName(), $httpStatus, $attempt + 1, $maxRetries, $delay));
 				sleep($delay);
 				continue;
 			}
 
-			$explanation = AbstractLlmProvider::explainHttpError($httpStatus, (string)($response['body'] ?? ''), (string)($response['error'] ?? ''));
-			Minz_Log::warning(sprintf(
-				'LlmClassification: Échec de l’appel API sur %s (%s, HTTP %d) : %s',
-				$url,
-				$provider->getName(),
-				$httpStatus,
-				$explanation
-			));
+			$explanation = AbstractLlmProvider::explainHttpError($httpStatus, (string)$responseBody, $curlError);
+			Minz_Log::warning(sprintf('LlmClassification: Échec appel API sur %s (%s, HTTP %d) : %s', $url, $provider->getName(), $httpStatus, $explanation));
 			return null;
 		}
 
-		if ($response === null || ($response['fail'] ?? false) || !is_string($response['body'] ?? null) || $response['body'] === '') {
-			@unlink($cachePath);
+		if (!is_string($responseBody) || $responseBody === '') {
 			return null;
 		}
 
-		$responseData = json_decode($response['body'], true);
+		$responseData = json_decode($responseBody, true);
 		if (!is_array($responseData)) {
-			@unlink($cachePath);
 			Minz_Log::warning('LlmClassification: Réponse JSON invalide reçue de l’API (HTTP ' . $httpStatus . ')');
 			return null;
 		}
@@ -466,18 +430,17 @@ final class LlmClassificationExtension extends Minz_Extension {
 		$content = is_array($choice) && is_array($choice['message'] ?? null) ? ($choice['message']['content'] ?? null) : null;
 
 		if (!is_string($content)) {
-			@unlink($cachePath);
-			Minz_Log::warning('LlmClassification: Clé `choices[0].message.content` introuvable dans la réponse API');
+			Minz_Log::warning('LlmClassification: Propriété `choices[0].message.content` introuvable dans la réponse API');
 			return null;
 		}
 
 		$parsed = self::parseClassificationJson($content);
 		if ($parsed === null) {
-			@unlink($cachePath);
 			Minz_Log::warning('LlmClassification: Impossible d’extraire la structure JSON retournée : ' . mb_substr($content, 0, 300));
 			return null;
 		}
 
+		@file_put_contents($cachePath, $content);
 		return $parsed;
 	}
 
@@ -528,7 +491,7 @@ final class LlmClassificationExtension extends Minz_Extension {
 			$entryDAO = FreshRSS_Factory::createEntryDao();
 			return $entryDAO->searchByGuid($feedId, $guid);
 		} catch (\Throwable $e) {
-			Minz_Log::warning('LlmClassification: Erreur lors de la recherche de l’entrée : ' . $e->getMessage());
+			Minz_Log::warning('LlmClassification: Erreur recherche entrée : ' . $e->getMessage());
 			return null;
 		}
 	}
@@ -573,14 +536,26 @@ final class LlmClassificationExtension extends Minz_Extension {
 			}
 		}
 
+		if ($classification === null) {
+			$classification = $this->callLlm($systemPrompt, $userPrompt);
+			if ($classification === null) {
+				return $entry;
+			}
+		}
+
 		$entry->_attribute($this->getEntrypoint(), [
 			self::ATTRIBUTE_PROMPT_HASH => $incomingPromptHash,
 		]);
 
-		if ($classification === null) {
-			$classification = $this->callLlm($systemPrompt, $userPrompt) ?? [];
+		$entry = $this->applyClassification($entry, $classification, removeOldTags: true);
+
+		$appliedTags = $classification['tags'] ?? [];
+		if (!empty($appliedTags)) {
+			echo '[LLM Classification] ✓ Tags ajoutés à "' . mb_substr($entry->title(), 0, 35) . '..." : ' . implode(', ', $appliedTags) . PHP_EOL;
+		} else {
+			echo '[LLM Classification] - Aucun tag pour "' . mb_substr($entry->title(), 0, 35) . '..."' . PHP_EOL;
 		}
 
-		return $this->applyClassification($entry, $classification, removeOldTags: true);
+		return $entry;
 	}
 }
